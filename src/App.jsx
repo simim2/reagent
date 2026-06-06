@@ -5,7 +5,7 @@ import {
 import {
   TrendingDown, Package, Upload, Download,
   Search, Edit2, Check, X, FlaskConical, Clock,
-  HardDriveDownload, Loader2, Wifi, WifiOff, PackagePlus,
+  HardDriveDownload, Loader2, Wifi, WifiOff, PackagePlus, Trash2,
 } from 'lucide-react'
 import XLSX from 'xlsx-js-style'
 import {
@@ -198,6 +198,17 @@ export default function App() {
       await Promise.all([loadReagents(), loadLogs()])
     }
   }, [loadReagents, loadLogs])
+
+  // ── 시약 삭제 ──────────────────────────────────────────────────────────
+  const handleDeleteReagent = useCallback(async (r) => {
+    if (!window.confirm(`"${r.name}" (${r.lotNo}) 을(를) 삭제하시겠습니까?\n출고·입고 이력은 유지됩니다.`)) return
+    setReagents((prev) => prev.filter((x) => x.id !== r.id))
+    const { error } = await supabase.from('reagents').delete().eq('id', r.id)
+    if (error) {
+      alert('삭제 중 오류가 발생했습니다.')
+      await loadReagents()
+    }
+  }, [loadReagents])
 
   // ── 입고 ───────────────────────────────────────────────────────────────
   const handleInbound = useCallback(async ({ mode, form }) => {
@@ -611,6 +622,7 @@ export default function App() {
             onClearFilter={() => setActiveFilter(null)}
             onSearch={setSearch}
             onDispatch={handleDispatch}
+            onDelete={handleDeleteReagent}
             onStartEdit={startEdit}
             onConfirmEdit={confirmEdit}
             onCancelEdit={cancelEdit}
@@ -644,7 +656,7 @@ function DashboardTab({
   reagents, expiring, lowStock, chartData,
   activeFilter, search, editingId, editValue,
   onToggleFilter, onClearFilter, onSearch,
-  onDispatch, onStartEdit, onConfirmEdit, onCancelEdit, onEditValue,
+  onDispatch, onDelete, onStartEdit, onConfirmEdit, onCancelEdit, onEditValue,
 }) {
   return (
     <>
@@ -712,6 +724,7 @@ function DashboardTab({
         onEditValue={onEditValue} onStartEdit={onStartEdit}
         onConfirmEdit={onConfirmEdit} onCancelEdit={onCancelEdit}
         onDispatch={onDispatch}
+        onDelete={onDelete}
       />
     </>
   )
@@ -755,7 +768,7 @@ function AlertCard({ icon, color, title, subtitle, count, active, onClick }) {
 // ══════════════════════════════════════════════════════════════════════════
 function ReagentTable({
   reagents, editingId, editValue,
-  onEditValue, onStartEdit, onConfirmEdit, onCancelEdit, onDispatch,
+  onEditValue, onStartEdit, onConfirmEdit, onCancelEdit, onDispatch, onDelete,
 }) {
   return (
     <div className="bg-white rounded-xl border border-slate-100 shadow-sm overflow-hidden">
@@ -763,14 +776,14 @@ function ReagentTable({
         <table className="w-full text-sm">
           <thead>
             <tr className="bg-blue-600 text-white">
-              {['시약명', '제조사', '구분', 'Lot No', '현재재고', '최소재고 (편집)', '유효기간', '누적출고', '출고'].map((h) => (
+              {['시약명', '제조사', '구분', 'Lot No', '현재재고', '최소재고 (편집)', '유효기간', '누적출고', '출고', ''].map((h) => (
                 <th key={h} className="px-4 py-2.5 text-left text-xs font-semibold whitespace-nowrap tracking-wide">{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {reagents.length === 0 ? (
-              <tr><td colSpan={9} className="text-center py-16 text-slate-400 text-sm">표시할 데이터가 없습니다.</td></tr>
+              <tr><td colSpan={10} className="text-center py-16 text-slate-400 text-sm">표시할 데이터가 없습니다.</td></tr>
             ) : reagents.map((r, i) => {
               const days = diffDays(r.expiryDate)
               const isExpiring = days >= 0 && days < 15
@@ -834,6 +847,15 @@ function ReagentTable({
                       className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
                     >
                       출고
+                    </button>
+                  </td>
+                  <td className="px-3 py-3">
+                    <button
+                      onClick={() => onDelete(r)}
+                      className="text-slate-300 hover:text-red-500 transition-colors p-1 rounded"
+                      title="삭제"
+                    >
+                      <Trash2 size={15} />
                     </button>
                   </td>
                 </tr>
