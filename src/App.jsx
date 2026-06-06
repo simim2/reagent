@@ -451,11 +451,13 @@ export default function App() {
         lotMap.set(lotNo, { ...existing, currentStock: newStock, receivedQty: newReceived })
       } else {
         const id = nextId++
-        const reagentType = String(row['구분'] ?? 'Reagent').trim()
+        const rawType = String(row['구분'] ?? '').trim()
+        const typeNorm = rawType.charAt(0).toUpperCase() + rawType.slice(1).toLowerCase()
+        const reagentType = ['Reagent', 'Cal', 'Con'].includes(typeNorm) ? typeNorm : 'Reagent'
         const newR = {
           id,
           name,
-          reagentType: ['Reagent','Cal','Con'].includes(reagentType) ? reagentType : 'Reagent',
+          reagentType,
           manufacturer: String(row['제조사'] ?? '').trim(),
           lotNo,
           receivedQty: qty,
