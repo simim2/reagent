@@ -250,11 +250,12 @@ export default function App() {
       const addQty = Number(form.qty)
       const newStock = target.currentStock + addQty
       const newReceived = target.receivedQty + addQty
+      const updatedLotNo = form.newLotNo.trim() || target.lotNo
       const logEntry = {
         id: Date.now(),
         reagentId: target.id,
         reagentName: target.name,
-        lotNo: target.lotNo,
+        lotNo: updatedLotNo,
         qty: addQty,
         datetime,
         notes: form.notes || '',
@@ -263,18 +264,21 @@ export default function App() {
       setReagents((prev) =>
         prev.map((r) =>
           r.id === target.id
-            ? { ...r, currentStock: newStock, receivedQty: newReceived }
+            ? { ...r, currentStock: newStock, receivedQty: newReceived, lotNo: updatedLotNo }
             : r,
         ),
       )
       setInboundLogs((prev) => [logEntry, ...prev])
 
+      const dbUpdate = {
+        current_stock: newStock,
+        received_qty: newReceived,
+        updated_at: now.toISOString(),
+      }
+      if (form.newLotNo.trim()) dbUpdate.lot_no = form.newLotNo.trim()
+
       const [{ error: e1 }, { error: e2 }] = await Promise.all([
-        supabase.from('reagents').update({
-          current_stock: newStock,
-          received_qty: newReceived,
-          updated_at: now.toISOString(),
-        }).eq('id', target.id),
+        supabase.from('reagents').update(dbUpdate).eq('id', target.id),
         supabase.from('inbound_logs').insert(toDbInbound(logEntry)),
       ])
       setSyncing(false)
@@ -397,6 +401,98 @@ export default function App() {
     XLSX.utils.book_append_sheet(wb, wsL, '출고이력_전체')
     XLSX.writeFile(wb, `재고백업_${stamp}.xlsx`)
   }, [reagents, logs])
+
+  // ── 입고 엑셀 템플릿 다운로드 ────────────────────────────────────────
+  const downloadInboundTemplate = useCallback(() => {
+    const ws = XLSX.utils.json_to_sheet([
+      { 시약명: 'CBC 희석액', 구분: 'Reagent', 제조사: 'Sysmex', 'Lot No': 'SX2025-001', 입고량: 10, 최소유지재고: 5, 유효기간: '2026-12-31', 비고: '' },
+    ])
+    ws['!cols'] = [{ wch: 28 }, { wch: 10 }, { wch: 14 }, { wch: 16 }, { wch: 8 }, { wch: 12 }, { wch: 12 }, { wch: 20 }]
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, '입고등록')
+    XLSX.writeFile(wb, '입고등록_템플릿.xlsx')
+  }, [])
+
+  // ── 엑셀 일괄 입고 ────────────────────────────────────────────────────
+  const handleBulkInbound = useCallback(async (rows) => {
+    if (rows.length === 0) return
+    const now = new Date()
+    const datetime = fmtDateTime(now)
+    setSyncing(true)
+
+    // Lot No 기준으로 기존 시약 맵 생성
+    const lotMap = new Map(reagents.map((r) => [r.lotNo.trim(), r]))
+    let nextId = Math.max(0, ...reagents.map((r) => r.id)) + 1
+
+    const newReagentsList = []
+    const updatesList = []      // { id, newStock, newReceived }
+    const inboundEntries = []
+
+    rows.forEach((row, idx) => {
+      const lotNo = String(row['Lot No'] ?? row['Lot No.'] ?? '').trim()
+      const qty   = Number(row['입고량'] ?? 0)
+      const name  = String(row['시약명'] ?? '').trim()
+      if (!name || qty < 1) return
+
+      const logBase = {
+        id: Date.now() + idx,
+        qty,
+        datetime,
+        notes: String(row['비고'] ?? ''),
+      }
+
+      if (lotMap.has(lotNo)) {
+        const existing = lotMap.get(lotNo)
+        const newStock    = existing.currentStock + qty
+        const newReceived = existing.receivedQty   + qty
+        updatesList.push({ id: existing.id, newStock, newReceived })
+        inboundEntries.push({ ...logBase, reagentId: existing.id, reagentName: existing.name, lotNo: existing.lotNo })
+        // 맵 업데이트 (같은 Lot 여러 행 처리)
+        lotMap.set(lotNo, { ...existing, currentStock: newStock, receivedQty: newReceived })
+      } else {
+        const id = nextId++
+        const reagentType = String(row['구분'] ?? 'Reagent').trim()
+        const newR = {
+          id,
+          name,
+          reagentType: ['Reagent','Cal','Con'].includes(reagentType) ? reagentType : 'Reagent',
+          manufacturer: String(row['제조사'] ?? '').trim(),
+          lotNo,
+          receivedQty: qty,
+          currentStock: qty,
+          minStock: Number(row['최소유지재고'] ?? 0),
+          expiryDate: parseExcelDate(row['유효기간']),
+          totalDispatched: 0,
+          createdAt: now.toISOString(),
+        }
+        newReagentsList.push(newR)
+        lotMap.set(lotNo, newR)
+        inboundEntries.push({ ...logBase, reagentId: id, reagentName: name, lotNo })
+      }
+    })
+
+    // DB 저장
+    const ops = []
+    if (newReagentsList.length > 0)
+      ops.push(supabase.from('reagents').insert(newReagentsList.map(toDbReagent)))
+    for (const u of updatesList)
+      ops.push(supabase.from('reagents').update({ current_stock: u.newStock, received_qty: u.newReceived, updated_at: now.toISOString() }).eq('id', u.id))
+    if (inboundEntries.length > 0)
+      ops.push(supabase.from('inbound_logs').insert(inboundEntries.map(toDbInbound)))
+
+    const results = await Promise.all(ops)
+    const hasError = results.some((r) => r.error)
+    setSyncing(false)
+
+    if (hasError) {
+      alert('일부 저장 중 오류가 발생했습니다.')
+      await Promise.all([loadReagents(), loadInboundLogs()])
+    } else {
+      await Promise.all([loadReagents(), loadInboundLogs()])
+      alert(`✅ 일괄 입고 완료\n신규 ${newReagentsList.length}종 · 재고 추가 ${updatesList.length}종 · 총 ${inboundEntries.length}건`)
+      setShowInboundModal(false)
+    }
+  }, [reagents, loadReagents, loadInboundLogs])
 
   // ── 월간 입출고 대장 ───────────────────────────────────────────────────
   const handleExport = useCallback(() => {
@@ -531,6 +627,8 @@ export default function App() {
           syncing={syncing}
           onClose={() => setShowInboundModal(false)}
           onSubmit={handleInbound}
+          onBulkInbound={handleBulkInbound}
+          onDownloadTemplate={downloadInboundTemplate}
         />
       )}
     </div>
@@ -885,11 +983,11 @@ function InboundHistoryTab({ inboundLogs }) {
 // ══════════════════════════════════════════════════════════════════════════
 // InboundModal
 // ══════════════════════════════════════════════════════════════════════════
-function InboundModal({ reagents, syncing, onClose, onSubmit }) {
+function InboundModal({ reagents, syncing, onClose, onSubmit, onBulkInbound, onDownloadTemplate }) {
   const [mode, setMode] = useState('new')
   const [form, setForm] = useState({
     name: '', reagentType: 'Reagent', manufacturer: '', lotNo: '', qty: 1, minStock: 0,
-    expiryDate: '', notes: '', reagentId: reagents[0]?.id ?? '',
+    expiryDate: '', notes: '', reagentId: reagents[0]?.id ?? '', newLotNo: '',
   })
   const setF = (k, v) => setForm((prev) => ({ ...prev, [k]: v }))
 
@@ -903,6 +1001,19 @@ function InboundModal({ reagents, syncing, onClose, onSubmit }) {
       if (Number(form.qty) < 1) { alert('추가 수량을 1 이상 입력해주세요.'); return }
     }
     onSubmit({ mode, form })
+  }
+
+  const handleBulkFile = (e) => {
+    const file = e.target.files[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (evt) => {
+      const wb = XLSX.read(evt.target.result, { type: 'array', cellDates: true })
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]])
+      onBulkInbound(rows)
+    }
+    reader.readAsArrayBuffer(file)
+    e.target.value = ''
   }
 
   return (
@@ -920,7 +1031,7 @@ function InboundModal({ reagents, syncing, onClose, onSubmit }) {
         </div>
         {/* 모드 탭 */}
         <div className="flex border-b shrink-0">
-          {[['new', '신규 Lot 등록'], ['existing', '기존 재고 추가']].map(([m, label]) => (
+          {[['new', '신규 Lot'], ['existing', '기존 재고 추가'], ['bulk', '엑셀 일괄']].map(([m, label]) => (
             <button
               key={m}
               onClick={() => setMode(m)}
@@ -960,8 +1071,9 @@ function InboundModal({ reagents, syncing, onClose, onSubmit }) {
                 <ModalField label="최소유지재고" type="number" value={form.minStock} onChange={(v) => setF('minStock', v)} />
               </div>
               <ModalField label="유효기간" type="date" value={form.expiryDate} onChange={(v) => setF('expiryDate', v)} />
+              <ModalField label="비고" value={form.notes} onChange={(v) => setF('notes', v)} placeholder="(선택 사항)" />
             </>
-          ) : (
+          ) : mode === 'existing' ? (
             <>
               <div>
                 <label className="block text-xs font-semibold text-slate-500 mb-1.5">시약 선택 *</label>
@@ -977,10 +1089,40 @@ function InboundModal({ reagents, syncing, onClose, onSubmit }) {
                   ))}
                 </select>
               </div>
+              <ModalField
+                label="변경된 Lot No (없으면 빈칸)"
+                value={form.newLotNo}
+                onChange={(v) => setF('newLotNo', v)}
+                placeholder="예) SX2025-002 (Lot 변경 시만 입력)"
+              />
               <ModalField label="추가 수량 *" type="number" value={form.qty} onChange={(v) => setF('qty', v)} />
+              <ModalField label="비고" value={form.notes} onChange={(v) => setF('notes', v)} placeholder="(선택 사항)" />
             </>
+          ) : (
+            <div className="space-y-4">
+              <div className="bg-slate-50 rounded-xl p-4 space-y-1 text-xs text-slate-500">
+                <p className="font-semibold text-slate-700 mb-2">엑셀 형식 안내</p>
+                <p>필수: <span className="font-mono text-slate-700">시약명, Lot No, 입고량</span></p>
+                <p>선택: <span className="font-mono text-slate-700">구분, 제조사, 최소유지재고, 유효기간, 비고</span></p>
+                <p className="mt-2 text-teal-600">• Lot No가 기존과 일치하면 재고 추가</p>
+                <p className="text-teal-600">• 새 Lot No면 신규 시약으로 자동 등록</p>
+              </div>
+              <button
+                onClick={onDownloadTemplate}
+                className="flex items-center gap-2 w-full justify-center border border-teal-300 text-teal-700 hover:bg-teal-50 text-sm font-medium py-2.5 rounded-lg transition-colors"
+              >
+                <Download size={14} />
+                템플릿 다운로드
+              </button>
+              <label className={`flex flex-col items-center gap-2 w-full border-2 border-dashed rounded-xl py-8 cursor-pointer transition-colors ${syncing ? 'border-slate-200 bg-slate-50' : 'border-teal-200 hover:border-teal-400 hover:bg-teal-50'}`}>
+                <Upload size={22} className={syncing ? 'text-slate-300' : 'text-teal-400'} />
+                <span className="text-sm font-medium text-slate-600">
+                  {syncing ? '처리 중...' : '엑셀 파일 선택 (.xlsx)'}
+                </span>
+                <input type="file" accept=".xlsx" className="hidden" disabled={syncing} onChange={handleBulkFile} />
+              </label>
+            </div>
           )}
-          <ModalField label="비고" value={form.notes} onChange={(v) => setF('notes', v)} placeholder="(선택 사항)" />
         </div>
         {/* 버튼 */}
         <div className="flex gap-3 px-6 pb-5 shrink-0">
@@ -990,13 +1132,15 @@ function InboundModal({ reagents, syncing, onClose, onSubmit }) {
           >
             취소
           </button>
-          <button
-            onClick={handleSubmit}
-            disabled={syncing}
-            className="flex-1 py-2.5 text-sm font-semibold bg-teal-600 hover:bg-teal-700 disabled:bg-slate-200 disabled:text-slate-400 text-white rounded-lg transition-colors"
-          >
-            {syncing ? '저장 중...' : '등록하기'}
-          </button>
+          {mode !== 'bulk' && (
+            <button
+              onClick={handleSubmit}
+              disabled={syncing}
+              className="flex-1 py-2.5 text-sm font-semibold bg-teal-600 hover:bg-teal-700 disabled:bg-slate-200 disabled:text-slate-400 text-white rounded-lg transition-colors"
+            >
+              {syncing ? '저장 중...' : '등록하기'}
+            </button>
+          )}
         </div>
       </div>
     </div>
