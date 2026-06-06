@@ -4,7 +4,7 @@ import {
 } from 'recharts'
 import {
   AlertTriangle, TrendingDown, Package, Upload, Download,
-  Search, Edit2, Check, X, FlaskConical, Clock,
+  Search, Edit2, Check, X, FlaskConical, Clock, HardDriveDownload,
 } from 'lucide-react'
 import * as XLSX from 'xlsx'
 
@@ -193,7 +193,7 @@ export default function App() {
   )
   const cancelEdit = useCallback(() => setEditingId(null), [])
 
-  // ── 엑셀 업로드 ────────────────────────────────────────────────────────
+  // ── 엑셀 업로드 (일반 재고파일 + 백업 복구 통합) ──────────────────────
   const handleUpload = useCallback((e) => {
     const file = e.target.files[0]
     if (!file) return
@@ -201,20 +201,55 @@ export default function App() {
     reader.onload = (evt) => {
       try {
         const wb = XLSX.read(evt.target.result, { type: 'array' })
-        const ws = wb.Sheets[wb.SheetNames[0]]
-        const data = XLSX.utils.sheet_to_json(ws)
-        const mapped = data.map((row, idx) => ({
-          id: idx + 1,
-          name: row['시약명'] ?? row['name'] ?? '',
-          manufacturer: row['제조사'] ?? row['manufacturer'] ?? '',
-          lotNo: row['Lot No'] ?? row['lotNo'] ?? '',
-          receivedQty: Number(row['입고량'] ?? row['receivedQty'] ?? 0),
-          currentStock: Number(row['현재재고'] ?? row['currentStock'] ?? 0),
-          minStock: Number(row['최소유지재고'] ?? row['minStock'] ?? 0),
-          expiryDate: String(row['유효기간'] ?? row['expiryDate'] ?? ''),
-          totalDispatched: Number(row['누적출고량'] ?? row['totalDispatched'] ?? 0),
-        }))
-        setReagents(mapped)
+        const isBackup = wb.SheetNames.includes('재고')
+
+        if (isBackup) {
+          // ── 백업 복구: 재고 + 출고이력 모두 복원 ──
+          const reagentRows = XLSX.utils.sheet_to_json(wb.Sheets['재고'])
+          const logRows = wb.Sheets['출고이력_전체']
+            ? XLSX.utils.sheet_to_json(wb.Sheets['출고이력_전체'])
+            : []
+
+          const restoredReagents = reagentRows.map((row) => ({
+            id: Number(row['id']),
+            name: String(row['시약명'] ?? ''),
+            manufacturer: String(row['제조사'] ?? ''),
+            lotNo: String(row['Lot No'] ?? ''),
+            receivedQty: Number(row['입고량'] ?? 0),
+            currentStock: Number(row['현재재고'] ?? 0),
+            minStock: Number(row['최소유지재고'] ?? 0),
+            expiryDate: String(row['유효기간'] ?? ''),
+            totalDispatched: Number(row['누적출고량'] ?? 0),
+          }))
+
+          const restoredLogs = logRows.map((row) => ({
+            id: Number(row['id']),
+            reagentId: Number(row['reagentId'] ?? 0),
+            reagentName: String(row['시약명'] ?? ''),
+            lotNo: String(row['Lot No'] ?? ''),
+            qty: Number(row['출고수량'] ?? 1),
+            datetime: String(row['출고일시'] ?? ''),
+          }))
+
+          setReagents(restoredReagents)
+          setLogs(restoredLogs)
+          alert(`✅ 백업 복구 완료\n시약 ${restoredReagents.length}종 · 출고이력 ${restoredLogs.length}건이 복원되었습니다.`)
+        } else {
+          // ── 일반 재고 파일 업로드 ──
+          const data = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]])
+          const mapped = data.map((row, idx) => ({
+            id: idx + 1,
+            name: row['시약명'] ?? row['name'] ?? '',
+            manufacturer: row['제조사'] ?? row['manufacturer'] ?? '',
+            lotNo: row['Lot No'] ?? row['lotNo'] ?? '',
+            receivedQty: Number(row['입고량'] ?? row['receivedQty'] ?? 0),
+            currentStock: Number(row['현재재고'] ?? row['currentStock'] ?? 0),
+            minStock: Number(row['최소유지재고'] ?? row['minStock'] ?? 0),
+            expiryDate: String(row['유효기간'] ?? row['expiryDate'] ?? ''),
+            totalDispatched: Number(row['누적출고량'] ?? row['totalDispatched'] ?? 0),
+          }))
+          setReagents(mapped)
+        }
       } catch {
         alert('파일을 읽는 중 오류가 발생했습니다. 형식을 확인해 주세요.')
       }
@@ -222,6 +257,49 @@ export default function App() {
     reader.readAsArrayBuffer(file)
     e.target.value = ''
   }, [])
+
+  // ── 전체 상태 백업 다운로드 ────────────────────────────────────────────
+  const handleBackup = useCallback(() => {
+    const now = new Date()
+    const stamp = `${fmtDate(now)}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}`
+
+    // Sheet 1: 재고
+    const reagentRows = reagents.map((r) => ({
+      'id': r.id,
+      '시약명': r.name,
+      '제조사': r.manufacturer,
+      'Lot No': r.lotNo,
+      '입고량': r.receivedQty,
+      '현재재고': r.currentStock,
+      '최소유지재고': r.minStock,
+      '유효기간': r.expiryDate,
+      '누적출고량': r.totalDispatched,
+    }))
+    const wsReagents = XLSX.utils.json_to_sheet(reagentRows)
+    wsReagents['!cols'] = [
+      { wch: 6 }, { wch: 32 }, { wch: 14 }, { wch: 16 },
+      { wch: 8 }, { wch: 8 }, { wch: 10 }, { wch: 12 }, { wch: 10 },
+    ]
+
+    // Sheet 2: 출고이력_전체
+    const logRows = logs.map((l) => ({
+      'id': l.id,
+      'reagentId': l.reagentId,
+      '시약명': l.reagentName,
+      'Lot No': l.lotNo,
+      '출고수량': l.qty,
+      '출고일시': l.datetime,
+    }))
+    const wsLogs = XLSX.utils.json_to_sheet(logRows)
+    wsLogs['!cols'] = [
+      { wch: 14 }, { wch: 8 }, { wch: 32 }, { wch: 16 }, { wch: 8 }, { wch: 18 },
+    ]
+
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, wsReagents, '재고')
+    XLSX.utils.book_append_sheet(wb, wsLogs, '출고이력_전체')
+    XLSX.writeFile(wb, `재고백업_${stamp}.xlsx`)
+  }, [reagents, logs])
 
   // ── 이번 달 엑셀 다운로드 ──────────────────────────────────────────────
   const handleExport = useCallback(() => {
@@ -255,23 +333,33 @@ export default function App() {
       {/* ── Header ── */}
       <header className="bg-white border-b border-slate-200 shadow-sm sticky top-0 z-10">
         <div className="max-w-7xl mx-auto px-4 sm:px-6">
-          <div className="flex items-center justify-between h-14">
-            <div className="flex items-center gap-3">
-              <div className="bg-blue-600 p-1.5 rounded-lg">
+          <div className="flex items-center justify-between h-14 gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="bg-blue-600 p-1.5 rounded-lg shrink-0">
                 <FlaskConical size={20} className="text-white" />
               </div>
-              <div>
-                <h1 className="text-base font-bold text-slate-800 leading-tight">
+              <div className="min-w-0">
+                <h1 className="text-base font-bold text-slate-800 leading-tight truncate">
                   시약 재고 관리 시스템
                 </h1>
                 <p className="text-[11px] text-slate-400">진단검사의학과 · Reagent Inventory</p>
               </div>
             </div>
-            <label className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg cursor-pointer transition-colors">
-              <Upload size={14} />
-              엑셀 업로드
-              <input type="file" accept=".xlsx,.csv" className="hidden" onChange={handleUpload} />
-            </label>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={handleBackup}
+                className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
+                title="현재 재고 + 출고이력 전체를 엑셀로 저장합니다"
+              >
+                <HardDriveDownload size={14} />
+                현재 재고상태 백업
+              </button>
+              <label className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg cursor-pointer transition-colors whitespace-nowrap">
+                <Upload size={14} />
+                엑셀 업로드
+                <input type="file" accept=".xlsx,.csv" className="hidden" onChange={handleUpload} />
+              </label>
+            </div>
           </div>
           {/* Tabs */}
           <div className="flex gap-0.5">
