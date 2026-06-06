@@ -1,12 +1,14 @@
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useEffect } from 'react'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts'
 import {
   AlertTriangle, TrendingDown, Package, Upload, Download,
-  Search, Edit2, Check, X, FlaskConical, Clock, HardDriveDownload,
+  Search, Edit2, Check, X, FlaskConical, Clock,
+  HardDriveDownload, Loader2, Wifi, WifiOff,
 } from 'lucide-react'
 import * as XLSX from 'xlsx'
+import { supabase, toAppReagent, toAppLog, toDbReagent, toDbLog } from './lib/supabase'
 
 // ── 날짜 유틸 ──────────────────────────────────────────────────────────────
 const fmtDate = (d) => {
@@ -28,82 +30,64 @@ const diffDays = (dateStr) => {
   return Math.ceil((exp - now) / (1000 * 60 * 60 * 24))
 }
 
-// ── 초기 시약 Mock 데이터 ────────────────────────────────────────────────
-const INIT_REAGENTS = [
-  {
-    id: 1, name: '혈액형 검사 시약 (ABO/Rh)', manufacturer: 'Bio-Rad',
-    lotNo: 'BR2024-001', receivedQty: 100, currentStock: 8,
-    minStock: 10, expiryDate: '2026-06-15', totalDispatched: 92,
-  },
-  {
-    id: 2, name: 'CBC 희석액', manufacturer: 'Sysmex',
-    lotNo: 'SX2024-102', receivedQty: 200, currentStock: 45,
-    minStock: 30, expiryDate: '2026-08-20', totalDispatched: 155,
-  },
-  {
-    id: 3, name: 'PT/APTT 응고 시약', manufacturer: 'Stago',
-    lotNo: 'ST2024-055', receivedQty: 50, currentStock: 12,
-    minStock: 15, expiryDate: '2026-06-10', totalDispatched: 38,
-  },
-  {
-    id: 4, name: 'HbA1c 측정 시약', manufacturer: 'Tosoh',
-    lotNo: 'TS2024-210', receivedQty: 80, currentStock: 30,
-    minStock: 20, expiryDate: '2026-09-05', totalDispatched: 50,
-  },
-  {
-    id: 5, name: 'Troponin I 키트', manufacturer: 'Abbott',
-    lotNo: 'AB2024-334', receivedQty: 60, currentStock: 5,
-    minStock: 8, expiryDate: '2026-07-30', totalDispatched: 55,
-  },
-  {
-    id: 6, name: '요검사 스트립', manufacturer: 'Roche',
-    lotNo: 'RC2024-412', receivedQty: 300, currentStock: 90,
-    minStock: 50, expiryDate: '2026-10-15', totalDispatched: 210,
-  },
-  {
-    id: 7, name: 'CRP 정량 시약', manufacturer: 'Beckman',
-    lotNo: 'BK2024-078', receivedQty: 40, currentStock: 18,
-    minStock: 10, expiryDate: '2026-06-18', totalDispatched: 22,
-  },
-]
-
-// ── 최근 7일 가상 출고 로그 생성 ─────────────────────────────────────────
-function genMockLogs() {
-  const logs = []
-  let id = 1
-  const now = new Date()
-  for (let d = 6; d >= 0; d--) {
-    const base = new Date(now)
-    base.setDate(base.getDate() - d)
-    const count = 2 + (d % 3)
-    for (let i = 0; i < count; i++) {
-      const r = INIT_REAGENTS[i % INIT_REAGENTS.length]
-      const hour = new Date(base)
-      hour.setHours(8 + ((i * 3) % 10), (i * 13) % 60, 0, 0)
-      logs.push({
-        id: id++,
-        reagentId: r.id,
-        reagentName: r.name,
-        lotNo: r.lotNo,
-        qty: 1 + (i % 3),
-        datetime: fmtDateTime(hour),
-      })
-    }
-  }
-  return logs.reverse()
-}
-
 // ══════════════════════════════════════════════════════════════════════════
 // App (root)
 // ══════════════════════════════════════════════════════════════════════════
 export default function App() {
-  const [reagents, setReagents] = useState(INIT_REAGENTS)
-  const [logs, setLogs] = useState(genMockLogs)
+  const [reagents, setReagents] = useState([])
+  const [logs, setLogs] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [syncing, setSyncing] = useState(false)
+  const [online, setOnline] = useState(true)
+
   const [activeTab, setActiveTab] = useState('dashboard')
   const [search, setSearch] = useState('')
-  const [activeFilter, setActiveFilter] = useState(null) // 'expiring' | 'lowStock'
+  const [activeFilter, setActiveFilter] = useState(null)
   const [editingId, setEditingId] = useState(null)
   const [editValue, setEditValue] = useState('')
+
+  // ── 초기 데이터 로드 + 실시간 구독 ────────────────────────────────────
+  const loadReagents = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('reagents')
+      .select('*')
+      .order('id')
+    if (error) { console.error(error); return }
+    setReagents(data.map(toAppReagent))
+  }, [])
+
+  const loadLogs = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('dispatch_logs')
+      .select('*')
+      .order('datetime', { ascending: false })
+    if (error) { console.error(error); return }
+    setLogs(data.map(toAppLog))
+  }, [])
+
+  useEffect(() => {
+    ;(async () => {
+      setLoading(true)
+      await Promise.all([loadReagents(), loadLogs()])
+      setLoading(false)
+    })()
+
+    // 실시간 구독 (다른 PC의 변경사항 즉시 반영)
+    const reagentChannel = supabase
+      .channel('reagents-rt')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'reagents' }, loadReagents)
+      .subscribe((status) => setOnline(status === 'SUBSCRIBED'))
+
+    const logChannel = supabase
+      .channel('logs-rt')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'dispatch_logs' }, loadLogs)
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(reagentChannel)
+      supabase.removeChannel(logChannel)
+    }
+  }, [loadReagents, loadLogs])
 
   // ── 알림 집계 ──────────────────────────────────────────────────────────
   const expiring = useMemo(
@@ -125,10 +109,7 @@ export default function App() {
       const total = logs
         .filter((l) => l.datetime.startsWith(dateKey))
         .reduce((s, l) => s + l.qty, 0)
-      return {
-        date: `${d.getMonth() + 1}/${d.getDate()}`,
-        출고량: total,
-      }
+      return { date: `${d.getMonth() + 1}/${d.getDate()}`, 출고량: total }
     })
   }, [logs])
 
@@ -150,61 +131,70 @@ export default function App() {
   }, [reagents, activeFilter, search, expiring, lowStock])
 
   // ── 출고 ───────────────────────────────────────────────────────────────
-  const handleDispatch = useCallback((r) => {
-    if (r.currentStock <= 0) {
-      alert(`${r.name} 재고가 없습니다.`)
-      return
-    }
+  const handleDispatch = useCallback(async (r) => {
+    if (r.currentStock <= 0) { alert(`${r.name} 재고가 없습니다.`); return }
     const now = new Date()
+    const newStock = r.currentStock - 1
+    const newDispatched = r.totalDispatched + 1
+    const logEntry = {
+      id: Date.now(),
+      reagentId: r.id,
+      reagentName: r.name,
+      lotNo: r.lotNo,
+      qty: 1,
+      datetime: fmtDateTime(now),
+    }
+
+    // 낙관적 UI 업데이트 (즉시 반영)
     setReagents((prev) =>
       prev.map((x) =>
-        x.id === r.id
-          ? { ...x, currentStock: x.currentStock - 1, totalDispatched: x.totalDispatched + 1 }
-          : x,
+        x.id === r.id ? { ...x, currentStock: newStock, totalDispatched: newDispatched } : x,
       ),
     )
-    setLogs((prev) => [
-      {
-        id: Date.now(),
-        reagentId: r.id,
-        reagentName: r.name,
-        lotNo: r.lotNo,
-        qty: 1,
-        datetime: fmtDateTime(now),
-      },
-      ...prev,
+    setLogs((prev) => [logEntry, ...prev])
+
+    // DB 저장
+    setSyncing(true)
+    const [{ error: e1 }, { error: e2 }] = await Promise.all([
+      supabase.from('reagents').update({
+        current_stock: newStock,
+        total_dispatched: newDispatched,
+        updated_at: now.toISOString(),
+      }).eq('id', r.id),
+      supabase.from('dispatch_logs').insert(toDbLog(logEntry)),
     ])
-  }, [])
+    setSyncing(false)
+    if (e1 || e2) {
+      alert('저장 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.')
+      await Promise.all([loadReagents(), loadLogs()]) // 롤백
+    }
+  }, [loadReagents, loadLogs])
 
   // ── 최소 재고 편집 ─────────────────────────────────────────────────────
-  const startEdit = useCallback((r) => {
-    setEditingId(r.id)
-    setEditValue(String(r.minStock))
-  }, [])
-  const confirmEdit = useCallback(
-    (id) => {
-      const val = parseInt(editValue, 10)
-      if (!isNaN(val) && val >= 0) {
-        setReagents((prev) => prev.map((r) => (r.id === id ? { ...r, minStock: val } : r)))
-      }
-      setEditingId(null)
-    },
-    [editValue],
-  )
+  const startEdit = useCallback((r) => { setEditingId(r.id); setEditValue(String(r.minStock)) }, [])
+  const confirmEdit = useCallback(async (id) => {
+    const val = parseInt(editValue, 10)
+    if (!isNaN(val) && val >= 0) {
+      setReagents((prev) => prev.map((r) => (r.id === id ? { ...r, minStock: val } : r)))
+      await supabase.from('reagents').update({ min_stock: val }).eq('id', id)
+    }
+    setEditingId(null)
+  }, [editValue])
   const cancelEdit = useCallback(() => setEditingId(null), [])
 
-  // ── 엑셀 업로드 (일반 재고파일 + 백업 복구 통합) ──────────────────────
-  const handleUpload = useCallback((e) => {
+  // ── 엑셀 업로드 ────────────────────────────────────────────────────────
+  const handleUpload = useCallback(async (e) => {
     const file = e.target.files[0]
     if (!file) return
     const reader = new FileReader()
-    reader.onload = (evt) => {
+    reader.onload = async (evt) => {
       try {
         const wb = XLSX.read(evt.target.result, { type: 'array' })
         const isBackup = wb.SheetNames.includes('재고')
 
+        setSyncing(true)
         if (isBackup) {
-          // ── 백업 복구: 재고 + 출고이력 모두 복원 ──
+          // ── 백업 복구 ──
           const reagentRows = XLSX.utils.sheet_to_json(wb.Sheets['재고'])
           const logRows = wb.Sheets['출고이력_전체']
             ? XLSX.utils.sheet_to_json(wb.Sheets['출고이력_전체'])
@@ -221,7 +211,6 @@ export default function App() {
             expiryDate: String(row['유효기간'] ?? ''),
             totalDispatched: Number(row['누적출고량'] ?? 0),
           }))
-
           const restoredLogs = logRows.map((row) => ({
             id: Number(row['id']),
             reagentId: Number(row['reagentId'] ?? 0),
@@ -231,11 +220,19 @@ export default function App() {
             datetime: String(row['출고일시'] ?? ''),
           }))
 
+          // DB 교체
+          await supabase.from('dispatch_logs').delete().neq('id', 0)
+          await supabase.from('reagents').delete().neq('id', 0)
+          if (restoredReagents.length > 0)
+            await supabase.from('reagents').insert(restoredReagents.map(toDbReagent))
+          if (restoredLogs.length > 0)
+            await supabase.from('dispatch_logs').insert(restoredLogs.map(toDbLog))
+
           setReagents(restoredReagents)
           setLogs(restoredLogs)
-          alert(`✅ 백업 복구 완료\n시약 ${restoredReagents.length}종 · 출고이력 ${restoredLogs.length}건이 복원되었습니다.`)
+          alert(`✅ 백업 복구 완료\n시약 ${restoredReagents.length}종 · 출고이력 ${restoredLogs.length}건`)
         } else {
-          // ── 일반 재고 파일 업로드 ──
+          // ── 일반 재고 파일 ──
           const data = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]])
           const mapped = data.map((row, idx) => ({
             id: idx + 1,
@@ -248,10 +245,15 @@ export default function App() {
             expiryDate: String(row['유효기간'] ?? row['expiryDate'] ?? ''),
             totalDispatched: Number(row['누적출고량'] ?? row['totalDispatched'] ?? 0),
           }))
+          await supabase.from('reagents').delete().neq('id', 0)
+          await supabase.from('reagents').insert(mapped.map(toDbReagent))
           setReagents(mapped)
         }
-      } catch {
-        alert('파일을 읽는 중 오류가 발생했습니다. 형식을 확인해 주세요.')
+        setSyncing(false)
+      } catch (err) {
+        setSyncing(false)
+        console.error(err)
+        alert('파일을 읽는 중 오류가 발생했습니다.')
       }
     }
     reader.readAsArrayBuffer(file)
@@ -262,42 +264,22 @@ export default function App() {
   const handleBackup = useCallback(() => {
     const now = new Date()
     const stamp = `${fmtDate(now)}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}`
-
-    // Sheet 1: 재고
     const reagentRows = reagents.map((r) => ({
-      'id': r.id,
-      '시약명': r.name,
-      '제조사': r.manufacturer,
-      'Lot No': r.lotNo,
-      '입고량': r.receivedQty,
-      '현재재고': r.currentStock,
-      '최소유지재고': r.minStock,
-      '유효기간': r.expiryDate,
-      '누적출고량': r.totalDispatched,
+      'id': r.id, '시약명': r.name, '제조사': r.manufacturer, 'Lot No': r.lotNo,
+      '입고량': r.receivedQty, '현재재고': r.currentStock,
+      '최소유지재고': r.minStock, '유효기간': r.expiryDate, '누적출고량': r.totalDispatched,
     }))
-    const wsReagents = XLSX.utils.json_to_sheet(reagentRows)
-    wsReagents['!cols'] = [
-      { wch: 6 }, { wch: 32 }, { wch: 14 }, { wch: 16 },
-      { wch: 8 }, { wch: 8 }, { wch: 10 }, { wch: 12 }, { wch: 10 },
-    ]
-
-    // Sheet 2: 출고이력_전체
     const logRows = logs.map((l) => ({
-      'id': l.id,
-      'reagentId': l.reagentId,
-      '시약명': l.reagentName,
-      'Lot No': l.lotNo,
-      '출고수량': l.qty,
-      '출고일시': l.datetime,
+      'id': l.id, 'reagentId': l.reagentId, '시약명': l.reagentName,
+      'Lot No': l.lotNo, '출고수량': l.qty, '출고일시': l.datetime,
     }))
-    const wsLogs = XLSX.utils.json_to_sheet(logRows)
-    wsLogs['!cols'] = [
-      { wch: 14 }, { wch: 8 }, { wch: 32 }, { wch: 16 }, { wch: 8 }, { wch: 18 },
-    ]
-
+    const wsR = XLSX.utils.json_to_sheet(reagentRows)
+    wsR['!cols'] = [{ wch:6},{wch:32},{wch:14},{wch:16},{wch:8},{wch:8},{wch:10},{wch:12},{wch:10}]
+    const wsL = XLSX.utils.json_to_sheet(logRows)
+    wsL['!cols'] = [{ wch:14},{wch:8},{wch:32},{wch:16},{wch:8},{wch:18}]
     const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, wsReagents, '재고')
-    XLSX.utils.book_append_sheet(wb, wsLogs, '출고이력_전체')
+    XLSX.utils.book_append_sheet(wb, wsR, '재고')
+    XLSX.utils.book_append_sheet(wb, wsL, '출고이력_전체')
     XLSX.writeFile(wb, `재고백업_${stamp}.xlsx`)
   }, [reagents, logs])
 
@@ -306,15 +288,9 @@ export default function App() {
     const now = new Date()
     const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
     const monthly = logs.filter((l) => l.datetime.startsWith(ym))
-    if (monthly.length === 0) {
-      alert('이번 달 출고 이력이 없습니다.')
-      return
-    }
+    if (monthly.length === 0) { alert('이번 달 출고 이력이 없습니다.'); return }
     const rows = monthly.map((l) => ({
-      '출고일시': l.datetime,
-      '시약명': l.reagentName,
-      'Lot No': l.lotNo,
-      '출고수량': l.qty,
+      '출고일시': l.datetime, '시약명': l.reagentName, 'Lot No': l.lotNo, '출고수량': l.qty,
     }))
     const ws = XLSX.utils.json_to_sheet(rows)
     ws['!cols'] = [{ wch: 18 }, { wch: 30 }, { wch: 16 }, { wch: 10 }]
@@ -324,9 +300,20 @@ export default function App() {
   }, [logs])
 
   const toggleFilter = useCallback(
-    (type) => setActiveFilter((prev) => (prev === type ? null : type)),
-    [],
+    (type) => setActiveFilter((prev) => (prev === type ? null : type)), [],
   )
+
+  // ── 로딩 화면 ──────────────────────────────────────────────────────────
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="text-center space-y-3">
+          <Loader2 size={36} className="text-blue-500 animate-spin mx-auto" />
+          <p className="text-slate-500 text-sm">데이터를 불러오는 중...</p>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -346,10 +333,20 @@ export default function App() {
               </div>
             </div>
             <div className="flex items-center gap-2 shrink-0">
+              {/* 동기화 상태 */}
+              <div className="flex items-center gap-1 text-xs mr-1">
+                {syncing ? (
+                  <><Loader2 size={12} className="text-blue-400 animate-spin" /><span className="text-blue-400">저장 중</span></>
+                ) : online ? (
+                  <><Wifi size={12} className="text-emerald-500" /><span className="text-emerald-500">연결됨</span></>
+                ) : (
+                  <><WifiOff size={12} className="text-slate-400" /><span className="text-slate-400">연결 끊김</span></>
+                )}
+              </div>
               <button
                 onClick={handleBackup}
                 className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
-                title="현재 재고 + 출고이력 전체를 엑셀로 저장합니다"
+                title="재고 + 출고이력 전체 백업"
               >
                 <HardDriveDownload size={14} />
                 현재 재고상태 백업
@@ -363,22 +360,21 @@ export default function App() {
           </div>
           {/* Tabs */}
           <div className="flex gap-0.5">
-            {[
-              { key: 'dashboard', label: '대시보드' },
-              { key: 'history', label: '출고 이력' },
-            ].map(({ key, label }) => (
-              <button
-                key={key}
-                onClick={() => setActiveTab(key)}
-                className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                  activeTab === key
-                    ? 'border-blue-600 text-blue-600'
-                    : 'border-transparent text-slate-500 hover:text-slate-700'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
+            {[{ key: 'dashboard', label: '대시보드' }, { key: 'history', label: '출고 이력' }].map(
+              ({ key, label }) => (
+                <button
+                  key={key}
+                  onClick={() => setActiveTab(key)}
+                  className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                    activeTab === key
+                      ? 'border-blue-600 text-blue-600'
+                      : 'border-transparent text-slate-500 hover:text-slate-700'
+                  }`}
+                >
+                  {label}
+                </button>
+              ),
+            )}
           </div>
         </div>
       </header>
@@ -423,29 +419,21 @@ function DashboardTab({
 }) {
   return (
     <>
-      {/* Alert Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <AlertCard
-          icon={<Clock size={20} />}
-          color="amber"
-          title="유효기간 임박 시약"
-          subtitle="유효기간 15일 미만"
-          count={expiring.length}
-          active={activeFilter === 'expiring'}
+          icon={<Clock size={20} />} color="amber"
+          title="유효기간 임박 시약" subtitle="유효기간 15일 미만"
+          count={expiring.length} active={activeFilter === 'expiring'}
           onClick={() => onToggleFilter('expiring')}
         />
         <AlertCard
-          icon={<TrendingDown size={20} />}
-          color="red"
-          title="재고 부족 시약"
-          subtitle="최소 유지 재고 미만"
-          count={lowStock.length}
-          active={activeFilter === 'lowStock'}
+          icon={<TrendingDown size={20} />} color="red"
+          title="재고 부족 시약" subtitle="최소 유지 재고 미만"
+          count={lowStock.length} active={activeFilter === 'lowStock'}
           onClick={() => onToggleFilter('lowStock')}
         />
       </div>
 
-      {/* Chart */}
       <div className="bg-white rounded-xl border border-slate-100 shadow-sm p-5">
         <div className="flex items-center gap-2 mb-4">
           <Package size={15} className="text-blue-500" />
@@ -466,7 +454,6 @@ function DashboardTab({
         </ResponsiveContainer>
       </div>
 
-      {/* Search + Filter badge */}
       <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
         <div className="relative flex-1 w-full">
           <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -480,31 +467,21 @@ function DashboardTab({
         {activeFilter && (
           <div className="flex items-center gap-2 shrink-0">
             <span className="text-xs text-slate-500">필터:</span>
-            <span
-              className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-full font-medium ${
-                activeFilter === 'expiring'
-                  ? 'bg-amber-100 text-amber-700'
-                  : 'bg-red-100 text-red-700'
-              }`}
-            >
+            <span className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-full font-medium ${
+              activeFilter === 'expiring' ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'
+            }`}>
               {activeFilter === 'expiring' ? '유효기간 임박' : '재고 부족'}
-              <button onClick={onClearFilter} className="ml-0.5 hover:opacity-70">
-                <X size={12} />
-              </button>
+              <button onClick={onClearFilter} className="ml-0.5 hover:opacity-70"><X size={12} /></button>
             </span>
           </div>
         )}
       </div>
 
-      {/* Reagent Table */}
       <ReagentTable
         reagents={reagents}
-        editingId={editingId}
-        editValue={editValue}
-        onEditValue={onEditValue}
-        onStartEdit={onStartEdit}
-        onConfirmEdit={onConfirmEdit}
-        onCancelEdit={onCancelEdit}
+        editingId={editingId} editValue={editValue}
+        onEditValue={onEditValue} onStartEdit={onStartEdit}
+        onConfirmEdit={onConfirmEdit} onCancelEdit={onCancelEdit}
         onDispatch={onDispatch}
       />
     </>
@@ -518,15 +495,11 @@ function AlertCard({ icon, color, title, subtitle, count, active, onClick }) {
   const cfg = {
     amber: {
       border: active ? 'border-amber-400 bg-amber-50' : 'border-amber-200 bg-white hover:border-amber-400',
-      iconBg: 'bg-amber-100 text-amber-600',
-      count: 'text-amber-600',
-      badge: count > 0 ? 'bg-amber-500' : 'bg-slate-300',
+      iconBg: 'bg-amber-100 text-amber-600', count: 'text-amber-600',
     },
     red: {
       border: active ? 'border-red-400 bg-red-50' : 'border-red-200 bg-white hover:border-red-400',
-      iconBg: 'bg-red-100 text-red-600',
-      count: 'text-red-600',
-      badge: count > 0 ? 'bg-red-500' : 'bg-slate-300',
+      iconBg: 'bg-red-100 text-red-600', count: 'text-red-600',
     },
   }[color]
 
@@ -561,135 +534,72 @@ function ReagentTable({
         <table className="w-full text-sm">
           <thead>
             <tr className="bg-blue-600 text-white">
-              {['시약명', '제조사', 'Lot No', '현재재고', '최소재고 (편집)', '유효기간', '누적출고', '출고'].map(
-                (h) => (
-                  <th
-                    key={h}
-                    className="px-4 py-2.5 text-left text-xs font-semibold whitespace-nowrap tracking-wide"
-                  >
-                    {h}
-                  </th>
-                ),
-              )}
+              {['시약명', '제조사', 'Lot No', '현재재고', '최소재고 (편집)', '유효기간', '누적출고', '출고'].map((h) => (
+                <th key={h} className="px-4 py-2.5 text-left text-xs font-semibold whitespace-nowrap tracking-wide">{h}</th>
+              ))}
             </tr>
           </thead>
           <tbody>
             {reagents.length === 0 ? (
-              <tr>
-                <td colSpan={8} className="text-center py-16 text-slate-400 text-sm">
-                  표시할 데이터가 없습니다.
-                </td>
-              </tr>
-            ) : (
-              reagents.map((r, i) => {
-                const days = diffDays(r.expiryDate)
-                const isExpiring = days >= 0 && days < 15
-                const isExpired = days < 0
-                const isLow = r.currentStock < r.minStock
-
-                return (
-                  <tr
-                    key={r.id}
-                    className={`border-t border-slate-50 hover:bg-blue-50/30 transition-colors ${
-                      i % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'
-                    }`}
-                  >
-                    {/* 시약명 */}
-                    <td className="px-4 py-3 font-medium text-slate-800 max-w-[200px]">
-                      <div className="truncate">{r.name}</div>
-                    </td>
-                    {/* 제조사 */}
-                    <td className="px-4 py-3 text-slate-500 whitespace-nowrap">{r.manufacturer}</td>
-                    {/* Lot No */}
-                    <td className="px-4 py-3 font-mono text-xs text-slate-500 whitespace-nowrap">
-                      {r.lotNo}
-                    </td>
-                    {/* 현재재고 */}
-                    <td className="px-4 py-3 whitespace-nowrap">
-                      <span
-                        className={`font-bold text-base ${isLow ? 'text-red-600' : 'text-slate-800'}`}
-                      >
-                        {r.currentStock}
-                      </span>
-                      {isLow && (
-                        <span className="ml-1.5 text-[10px] font-semibold bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full">
-                          부족
-                        </span>
-                      )}
-                    </td>
-                    {/* 최소재고 (편집) */}
-                    <td className="px-4 py-3 whitespace-nowrap">
-                      {editingId === r.id ? (
-                        <div className="flex items-center gap-1">
-                          <input
-                            type="number"
-                            min="0"
-                            value={editValue}
-                            onChange={(e) => onEditValue(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') onConfirmEdit(r.id)
-                              if (e.key === 'Escape') onCancelEdit()
-                            }}
-                            className="w-16 border border-blue-300 rounded px-2 py-0.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400"
-                            autoFocus
-                          />
-                          <button
-                            onClick={() => onConfirmEdit(r.id)}
-                            className="text-blue-600 hover:text-blue-800 p-0.5"
-                          >
-                            <Check size={14} />
-                          </button>
-                          <button
-                            onClick={onCancelEdit}
-                            className="text-slate-400 hover:text-slate-600 p-0.5"
-                          >
-                            <X size={14} />
-                          </button>
-                        </div>
-                      ) : (
-                        <button
-                          onClick={() => onStartEdit(r)}
-                          className="flex items-center gap-1.5 text-slate-600 hover:text-blue-600 group transition-colors"
-                          title="클릭하여 수정"
-                        >
-                          <span className="font-medium">{r.minStock}</span>
-                          <Edit2
-                            size={11}
-                            className="text-slate-300 group-hover:text-blue-500 transition-colors"
-                          />
-                        </button>
-                      )}
-                    </td>
-                    {/* 유효기간 */}
-                    <td className="px-4 py-3 whitespace-nowrap">
-                      {isExpired ? (
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-slate-200 text-slate-500 font-medium">
-                          만료됨
-                        </span>
-                      ) : isExpiring ? (
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold">
-                          D-{days} ({r.expiryDate})
-                        </span>
-                      ) : (
-                        <span className="text-slate-500 text-xs">{r.expiryDate}</span>
-                      )}
-                    </td>
-                    {/* 누적출고 */}
-                    <td className="px-4 py-3 text-slate-500 tabular-nums">{r.totalDispatched}</td>
-                    {/* 출고 버튼 */}
-                    <td className="px-4 py-3">
-                      <button
-                        onClick={() => onDispatch(r)}
-                        disabled={r.currentStock <= 0}
-                        className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
-                      >
-                        출고
+              <tr><td colSpan={8} className="text-center py-16 text-slate-400 text-sm">표시할 데이터가 없습니다.</td></tr>
+            ) : reagents.map((r, i) => {
+              const days = diffDays(r.expiryDate)
+              const isExpiring = days >= 0 && days < 15
+              const isExpired = days < 0
+              const isLow = r.currentStock < r.minStock
+              return (
+                <tr key={r.id} className={`border-t border-slate-50 hover:bg-blue-50/30 transition-colors ${i % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'}`}>
+                  <td className="px-4 py-3 font-medium text-slate-800 max-w-[200px]">
+                    <div className="truncate">{r.name}</div>
+                  </td>
+                  <td className="px-4 py-3 text-slate-500 whitespace-nowrap">{r.manufacturer}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-slate-500 whitespace-nowrap">{r.lotNo}</td>
+                  <td className="px-4 py-3 whitespace-nowrap">
+                    <span className={`font-bold text-base ${isLow ? 'text-red-600' : 'text-slate-800'}`}>{r.currentStock}</span>
+                    {isLow && <span className="ml-1.5 text-[10px] font-semibold bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full">부족</span>}
+                  </td>
+                  <td className="px-4 py-3 whitespace-nowrap">
+                    {editingId === r.id ? (
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="number" min="0" value={editValue}
+                          onChange={(e) => onEditValue(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === 'Enter') onConfirmEdit(r.id); if (e.key === 'Escape') onCancelEdit() }}
+                          className="w-16 border border-blue-300 rounded px-2 py-0.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400"
+                          autoFocus
+                        />
+                        <button onClick={() => onConfirmEdit(r.id)} className="text-blue-600 hover:text-blue-800 p-0.5"><Check size={14} /></button>
+                        <button onClick={onCancelEdit} className="text-slate-400 hover:text-slate-600 p-0.5"><X size={14} /></button>
+                      </div>
+                    ) : (
+                      <button onClick={() => onStartEdit(r)} className="flex items-center gap-1.5 text-slate-600 hover:text-blue-600 group transition-colors" title="클릭하여 수정">
+                        <span className="font-medium">{r.minStock}</span>
+                        <Edit2 size={11} className="text-slate-300 group-hover:text-blue-500 transition-colors" />
                       </button>
-                    </td>
-                  </tr>
-                )
-              })
-            )}
+                    )}
+                  </td>
+                  <td className="px-4 py-3 whitespace-nowrap">
+                    {isExpired ? (
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-slate-200 text-slate-500 font-medium">만료됨</span>
+                    ) : isExpiring ? (
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold">D-{days} ({r.expiryDate})</span>
+                    ) : (
+                      <span className="text-slate-500 text-xs">{r.expiryDate}</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-slate-500 tabular-nums">{r.totalDispatched}</td>
+                  <td className="px-4 py-3">
+                    <button
+                      onClick={() => onDispatch(r)}
+                      disabled={r.currentStock <= 0}
+                      className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
+                    >
+                      출고
+                    </button>
+                  </td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       </div>
@@ -705,13 +615,10 @@ function ReagentTable({
 // ══════════════════════════════════════════════════════════════════════════
 function HistoryTab({ logs, onExport }) {
   const [search, setSearch] = useState('')
-
   const filtered = useMemo(() => {
     if (!search.trim()) return logs
     const q = search.trim().toLowerCase()
-    return logs.filter(
-      (l) => l.reagentName.toLowerCase().includes(q) || l.lotNo.toLowerCase().includes(q),
-    )
+    return logs.filter((l) => l.reagentName.toLowerCase().includes(q) || l.lotNo.toLowerCase().includes(q))
   }, [logs, search])
 
   const now = new Date()
@@ -719,7 +626,6 @@ function HistoryTab({ logs, onExport }) {
 
   return (
     <div className="space-y-4">
-      {/* Header row */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
           <h2 className="text-base font-semibold text-slate-700">출고 이력 목록</h2>
@@ -733,64 +639,37 @@ function HistoryTab({ logs, onExport }) {
           {thisMonth} 엑셀 다운로드
         </button>
       </div>
-
-      {/* Search */}
       <div className="relative">
         <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
         <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          value={search} onChange={(e) => setSearch(e.target.value)}
           placeholder="시약명, Lot No 검색..."
           className="w-full pl-9 pr-4 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white"
         />
       </div>
-
-      {/* Log Table */}
       <div className="bg-white rounded-xl border border-slate-100 shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="bg-blue-600 text-white">
                 {['출고일시', '시약명', 'Lot No', '출고수량'].map((h) => (
-                  <th
-                    key={h}
-                    className="px-4 py-2.5 text-left text-xs font-semibold whitespace-nowrap tracking-wide"
-                  >
-                    {h}
-                  </th>
+                  <th key={h} className="px-4 py-2.5 text-left text-xs font-semibold whitespace-nowrap tracking-wide">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {filtered.length === 0 ? (
-                <tr>
-                  <td colSpan={4} className="text-center py-16 text-slate-400 text-sm">
-                    출고 이력이 없습니다.
+                <tr><td colSpan={4} className="text-center py-16 text-slate-400 text-sm">출고 이력이 없습니다.</td></tr>
+              ) : filtered.map((l, i) => (
+                <tr key={l.id} className={`border-t border-slate-50 hover:bg-blue-50/30 transition-colors ${i % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'}`}>
+                  <td className="px-4 py-2.5 font-mono text-xs text-slate-500 whitespace-nowrap">{l.datetime}</td>
+                  <td className="px-4 py-2.5 font-medium text-slate-800">{l.reagentName}</td>
+                  <td className="px-4 py-2.5 font-mono text-xs text-slate-500 whitespace-nowrap">{l.lotNo}</td>
+                  <td className="px-4 py-2.5">
+                    <span className="bg-blue-100 text-blue-700 text-xs font-bold px-2 py-0.5 rounded-full">{l.qty}개</span>
                   </td>
                 </tr>
-              ) : (
-                filtered.map((l, i) => (
-                  <tr
-                    key={l.id}
-                    className={`border-t border-slate-50 hover:bg-blue-50/30 transition-colors ${
-                      i % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'
-                    }`}
-                  >
-                    <td className="px-4 py-2.5 font-mono text-xs text-slate-500 whitespace-nowrap">
-                      {l.datetime}
-                    </td>
-                    <td className="px-4 py-2.5 font-medium text-slate-800">{l.reagentName}</td>
-                    <td className="px-4 py-2.5 font-mono text-xs text-slate-500 whitespace-nowrap">
-                      {l.lotNo}
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <span className="bg-blue-100 text-blue-700 text-xs font-bold px-2 py-0.5 rounded-full">
-                        {l.qty}개
-                      </span>
-                    </td>
-                  </tr>
-                ))
-              )}
+              ))}
             </tbody>
           </table>
         </div>
