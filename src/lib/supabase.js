@@ -16,6 +16,7 @@ export const toAppReagent = (r) => ({
   minStock: r.min_stock,
   expiryDate: r.expiry_date,
   totalDispatched: r.total_dispatched,
+  createdAt: r.created_at ?? null,
 })
 
 export const toDbReagent = (r) => ({

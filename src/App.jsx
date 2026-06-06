@@ -7,8 +7,9 @@ import {
   Search, Edit2, Check, X, FlaskConical, Clock,
   HardDriveDownload, Loader2, Wifi, WifiOff,
 } from 'lucide-react'
-import * as XLSX from 'xlsx'
+import XLSX from 'xlsx-js-style'
 import { supabase, toAppReagent, toAppLog, toDbReagent, toDbLog } from './lib/supabase'
+import { generateMonthlyReport } from './lib/exportReport'
 
 // ── 날짜 유틸 ──────────────────────────────────────────────────────────────
 const fmtDate = (d) => {
@@ -68,7 +69,7 @@ export default function App() {
   const loadReagents = useCallback(async () => {
     const { data, error } = await supabase
       .from('reagents')
-      .select('*')
+      .select('*, created_at')
       .order('id')
     if (error) { console.error(error); return }
     setReagents(data.map(toAppReagent))
@@ -301,21 +302,14 @@ export default function App() {
     XLSX.writeFile(wb, `재고백업_${stamp}.xlsx`)
   }, [reagents, logs])
 
-  // ── 이번 달 엑셀 다운로드 ──────────────────────────────────────────────
+  // ── 이번 달 월간 입출고 대장 다운로드 ─────────────────────────────────
   const handleExport = useCallback(() => {
     const now = new Date()
     const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
     const monthly = logs.filter((l) => l.datetime.startsWith(ym))
     if (monthly.length === 0) { alert('이번 달 출고 이력이 없습니다.'); return }
-    const rows = monthly.map((l) => ({
-      '출고일시': l.datetime, '시약명': l.reagentName, 'Lot No': l.lotNo, '출고수량': l.qty,
-    }))
-    const ws = XLSX.utils.json_to_sheet(rows)
-    ws['!cols'] = [{ wch: 18 }, { wch: 30 }, { wch: 16 }, { wch: 10 }]
-    const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, ws, '출고이력')
-    XLSX.writeFile(wb, `출고이력_${ym}.xlsx`)
-  }, [logs])
+    generateMonthlyReport(logs, reagents, now.getFullYear(), now.getMonth() + 1)
+  }, [logs, reagents])
 
   const toggleFilter = useCallback(
     (type) => setActiveFilter((prev) => (prev === type ? null : type)), [],
@@ -654,7 +648,7 @@ function HistoryTab({ logs, onExport }) {
           className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors shrink-0"
         >
           <Download size={15} />
-          {thisMonth} 엑셀 다운로드
+          {thisMonth} 입출고 대장 다운로드
         </button>
       </div>
       <div className="relative">
