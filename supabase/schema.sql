@@ -42,7 +42,27 @@ CREATE POLICY "anon_all_reagents"
 CREATE POLICY "anon_all_dispatch_logs"
   ON dispatch_logs FOR ALL TO anon USING (true) WITH CHECK (true);
 
--- 5. 초기 시약 데이터 (이미 있으면 건너뜀)
+-- 5. 신규 컬럼 추가 (이미 있으면 무시)
+ALTER TABLE reagents ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+ALTER TABLE reagents ADD COLUMN IF NOT EXISTS reagent_type TEXT DEFAULT 'Reagent';
+
+-- 6. 입고 이력 테이블
+CREATE TABLE IF NOT EXISTS inbound_logs (
+  id           BIGINT  PRIMARY KEY,
+  reagent_id   INTEGER,
+  reagent_name TEXT    NOT NULL DEFAULT '',
+  lot_no       TEXT    DEFAULT '',
+  qty          INTEGER DEFAULT 1,
+  datetime     TEXT    NOT NULL DEFAULT '',
+  notes        TEXT    DEFAULT '',
+  created_at   TIMESTAMPTZ DEFAULT NOW()
+);
+ALTER TABLE inbound_logs ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "anon_all_inbound_logs" ON inbound_logs;
+CREATE POLICY "anon_all_inbound_logs"
+  ON inbound_logs FOR ALL TO anon USING (true) WITH CHECK (true);
+
+-- 7. 초기 시약 데이터 (이미 있으면 건너뜀)
 INSERT INTO reagents (id, name, manufacturer, lot_no, received_qty, current_stock, min_stock, expiry_date, total_dispatched) VALUES
   (1, '혈액형 검사 시약 (ABO/Rh)', 'Bio-Rad',  'BR2024-001', 100,  8, 10, '2026-06-15',  92),
   (2, 'CBC 희석액',                 'Sysmex',   'SX2024-102', 200, 45, 30, '2026-08-20', 155),

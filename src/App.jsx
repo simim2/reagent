@@ -3,12 +3,16 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts'
 import {
-  AlertTriangle, TrendingDown, Package, Upload, Download,
+  TrendingDown, Package, Upload, Download,
   Search, Edit2, Check, X, FlaskConical, Clock,
-  HardDriveDownload, Loader2, Wifi, WifiOff,
+  HardDriveDownload, Loader2, Wifi, WifiOff, PackagePlus,
 } from 'lucide-react'
 import XLSX from 'xlsx-js-style'
-import { supabase, toAppReagent, toAppLog, toDbReagent, toDbLog } from './lib/supabase'
+import {
+  supabase,
+  toAppReagent, toAppLog, toAppInbound,
+  toDbReagent, toDbLog, toDbInbound,
+} from './lib/supabase'
 import { generateMonthlyReport } from './lib/exportReport'
 
 // ── 날짜 유틸 ──────────────────────────────────────────────────────────────
@@ -19,28 +23,26 @@ const fmtDate = (d) => {
   return `${y}-${m}-${day}`
 }
 
-// Excel 날짜값 → YYYY-MM-DD 문자열
-// Excel은 날짜를 시리얼 숫자(예: 46265)로 저장하므로 변환 필요
 const parseExcelDate = (val) => {
   if (!val) return ''
   if (val instanceof Date) return fmtDate(val)
   if (typeof val === 'string') {
-    // 이미 날짜 형식이면 그대로
     if (/^\d{4}-\d{2}-\d{2}/.test(val)) return val.slice(0, 10)
     return val
   }
   if (typeof val === 'number') {
-    // Excel 시리얼 → JS Date (Excel epoch: 1899-12-30)
     const d = new Date(Math.round((val - 25569) * 86400 * 1000))
     return fmtDate(d)
   }
   return String(val)
 }
+
 const fmtDateTime = (d) => {
   const h = String(d.getHours()).padStart(2, '0')
   const min = String(d.getMinutes()).padStart(2, '0')
   return `${fmtDate(d)} ${h}:${min}`
 }
+
 const diffDays = (dateStr) => {
   const exp = new Date(dateStr)
   const now = new Date()
@@ -55,9 +57,11 @@ const diffDays = (dateStr) => {
 export default function App() {
   const [reagents, setReagents] = useState([])
   const [logs, setLogs] = useState([])
+  const [inboundLogs, setInboundLogs] = useState([])
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
   const [online, setOnline] = useState(true)
+  const [showInboundModal, setShowInboundModal] = useState(false)
 
   const [activeTab, setActiveTab] = useState('dashboard')
   const [search, setSearch] = useState('')
@@ -65,33 +69,35 @@ export default function App() {
   const [editingId, setEditingId] = useState(null)
   const [editValue, setEditValue] = useState('')
 
-  // ── 초기 데이터 로드 + 실시간 구독 ────────────────────────────────────
+  // ── 데이터 로드 + 실시간 구독 ──────────────────────────────────────────
   const loadReagents = useCallback(async () => {
     const { data, error } = await supabase
-      .from('reagents')
-      .select('*, created_at')
-      .order('id')
+      .from('reagents').select('*, created_at').order('id')
     if (error) { console.error(error); return }
     setReagents(data.map(toAppReagent))
   }, [])
 
   const loadLogs = useCallback(async () => {
     const { data, error } = await supabase
-      .from('dispatch_logs')
-      .select('*')
-      .order('datetime', { ascending: false })
+      .from('dispatch_logs').select('*').order('datetime', { ascending: false })
     if (error) { console.error(error); return }
     setLogs(data.map(toAppLog))
+  }, [])
+
+  const loadInboundLogs = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('inbound_logs').select('*').order('datetime', { ascending: false })
+    if (error) { console.error(error); return }
+    setInboundLogs(data.map(toAppInbound))
   }, [])
 
   useEffect(() => {
     ;(async () => {
       setLoading(true)
-      await Promise.all([loadReagents(), loadLogs()])
+      await Promise.all([loadReagents(), loadLogs(), loadInboundLogs()])
       setLoading(false)
     })()
 
-    // 실시간 구독 (다른 PC의 변경사항 즉시 반영)
     const reagentChannel = supabase
       .channel('reagents-rt')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'reagents' }, loadReagents)
@@ -102,11 +108,17 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'dispatch_logs' }, loadLogs)
       .subscribe()
 
+    const inboundChannel = supabase
+      .channel('inbound-rt')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'inbound_logs' }, loadInboundLogs)
+      .subscribe()
+
     return () => {
       supabase.removeChannel(reagentChannel)
       supabase.removeChannel(logChannel)
+      supabase.removeChannel(inboundChannel)
     }
-  }, [loadReagents, loadLogs])
+  }, [loadReagents, loadLogs, loadInboundLogs])
 
   // ── 알림 집계 ──────────────────────────────────────────────────────────
   const expiring = useMemo(
@@ -164,7 +176,6 @@ export default function App() {
       datetime: fmtDateTime(now),
     }
 
-    // 낙관적 UI 업데이트 (즉시 반영)
     setReagents((prev) =>
       prev.map((x) =>
         x.id === r.id ? { ...x, currentStock: newStock, totalDispatched: newDispatched } : x,
@@ -172,7 +183,6 @@ export default function App() {
     )
     setLogs((prev) => [logEntry, ...prev])
 
-    // DB 저장
     setSyncing(true)
     const [{ error: e1 }, { error: e2 }] = await Promise.all([
       supabase.from('reagents').update({
@@ -185,9 +195,98 @@ export default function App() {
     setSyncing(false)
     if (e1 || e2) {
       alert('저장 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.')
-      await Promise.all([loadReagents(), loadLogs()]) // 롤백
+      await Promise.all([loadReagents(), loadLogs()])
     }
   }, [loadReagents, loadLogs])
+
+  // ── 입고 ───────────────────────────────────────────────────────────────
+  const handleInbound = useCallback(async ({ mode, form }) => {
+    const now = new Date()
+    const datetime = fmtDateTime(now)
+    setSyncing(true)
+
+    if (mode === 'new') {
+      const newId = Math.max(0, ...reagents.map((r) => r.id)) + 1
+      const newReagent = {
+        id: newId,
+        name: form.name.trim(),
+        reagentType: form.reagentType || 'Reagent',
+        manufacturer: form.manufacturer.trim(),
+        lotNo: form.lotNo.trim(),
+        receivedQty: Number(form.qty),
+        currentStock: Number(form.qty),
+        minStock: Number(form.minStock) || 0,
+        expiryDate: form.expiryDate,
+        totalDispatched: 0,
+        createdAt: now.toISOString(),
+      }
+      const logEntry = {
+        id: Date.now(),
+        reagentId: newId,
+        reagentName: newReagent.name,
+        lotNo: newReagent.lotNo,
+        qty: Number(form.qty),
+        datetime,
+        notes: form.notes || '',
+      }
+
+      setReagents((prev) => [...prev, newReagent])
+      setInboundLogs((prev) => [logEntry, ...prev])
+
+      const [{ error: e1 }, { error: e2 }] = await Promise.all([
+        supabase.from('reagents').insert(toDbReagent(newReagent)),
+        supabase.from('inbound_logs').insert(toDbInbound(logEntry)),
+      ])
+      setSyncing(false)
+      if (e1 || e2) {
+        alert('저장 오류가 발생했습니다.')
+        await Promise.all([loadReagents(), loadInboundLogs()])
+        return
+      }
+    } else {
+      const target = reagents.find((r) => r.id === Number(form.reagentId))
+      if (!target) { setSyncing(false); return }
+
+      const addQty = Number(form.qty)
+      const newStock = target.currentStock + addQty
+      const newReceived = target.receivedQty + addQty
+      const logEntry = {
+        id: Date.now(),
+        reagentId: target.id,
+        reagentName: target.name,
+        lotNo: target.lotNo,
+        qty: addQty,
+        datetime,
+        notes: form.notes || '',
+      }
+
+      setReagents((prev) =>
+        prev.map((r) =>
+          r.id === target.id
+            ? { ...r, currentStock: newStock, receivedQty: newReceived }
+            : r,
+        ),
+      )
+      setInboundLogs((prev) => [logEntry, ...prev])
+
+      const [{ error: e1 }, { error: e2 }] = await Promise.all([
+        supabase.from('reagents').update({
+          current_stock: newStock,
+          received_qty: newReceived,
+          updated_at: now.toISOString(),
+        }).eq('id', target.id),
+        supabase.from('inbound_logs').insert(toDbInbound(logEntry)),
+      ])
+      setSyncing(false)
+      if (e1 || e2) {
+        alert('저장 오류가 발생했습니다.')
+        await Promise.all([loadReagents(), loadInboundLogs()])
+        return
+      }
+    }
+
+    setShowInboundModal(false)
+  }, [reagents, loadReagents, loadInboundLogs])
 
   // ── 최소 재고 편집 ─────────────────────────────────────────────────────
   const startEdit = useCallback((r) => { setEditingId(r.id); setEditValue(String(r.minStock)) }, [])
@@ -213,7 +312,6 @@ export default function App() {
 
         setSyncing(true)
         if (isBackup) {
-          // ── 백업 복구 ──
           const reagentRows = XLSX.utils.sheet_to_json(wb.Sheets['재고'])
           const logRows = wb.Sheets['출고이력_전체']
             ? XLSX.utils.sheet_to_json(wb.Sheets['출고이력_전체'])
@@ -239,7 +337,6 @@ export default function App() {
             datetime: String(row['출고일시'] ?? ''),
           }))
 
-          // DB 교체
           await supabase.from('dispatch_logs').delete().neq('id', 0)
           await supabase.from('reagents').delete().neq('id', 0)
           if (restoredReagents.length > 0)
@@ -251,7 +348,6 @@ export default function App() {
           setLogs(restoredLogs)
           alert(`✅ 백업 복구 완료\n시약 ${restoredReagents.length}종 · 출고이력 ${restoredLogs.length}건`)
         } else {
-          // ── 일반 재고 파일 ──
           const data = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]])
           const mapped = data.map((row, idx) => ({
             id: idx + 1,
@@ -279,10 +375,10 @@ export default function App() {
     e.target.value = ''
   }, [])
 
-  // ── 전체 상태 백업 다운로드 ────────────────────────────────────────────
+  // ── 전체 상태 백업 ─────────────────────────────────────────────────────
   const handleBackup = useCallback(() => {
     const now = new Date()
-    const stamp = `${fmtDate(now)}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}`
+    const stamp = `${fmtDate(now)}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`
     const reagentRows = reagents.map((r) => ({
       'id': r.id, '시약명': r.name, '제조사': r.manufacturer, 'Lot No': r.lotNo,
       '입고량': r.receivedQty, '현재재고': r.currentStock,
@@ -293,23 +389,23 @@ export default function App() {
       'Lot No': l.lotNo, '출고수량': l.qty, '출고일시': l.datetime,
     }))
     const wsR = XLSX.utils.json_to_sheet(reagentRows)
-    wsR['!cols'] = [{ wch:6},{wch:32},{wch:14},{wch:16},{wch:8},{wch:8},{wch:10},{wch:12},{wch:10}]
+    wsR['!cols'] = [{ wch: 6 }, { wch: 32 }, { wch: 14 }, { wch: 16 }, { wch: 8 }, { wch: 8 }, { wch: 10 }, { wch: 12 }, { wch: 10 }]
     const wsL = XLSX.utils.json_to_sheet(logRows)
-    wsL['!cols'] = [{ wch:14},{wch:8},{wch:32},{wch:16},{wch:8},{wch:18}]
+    wsL['!cols'] = [{ wch: 14 }, { wch: 8 }, { wch: 32 }, { wch: 16 }, { wch: 8 }, { wch: 18 }]
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, wsR, '재고')
     XLSX.utils.book_append_sheet(wb, wsL, '출고이력_전체')
     XLSX.writeFile(wb, `재고백업_${stamp}.xlsx`)
   }, [reagents, logs])
 
-  // ── 이번 달 월간 입출고 대장 다운로드 ─────────────────────────────────
+  // ── 월간 입출고 대장 ───────────────────────────────────────────────────
   const handleExport = useCallback(() => {
     const now = new Date()
     const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
     const monthly = logs.filter((l) => l.datetime.startsWith(ym))
     if (monthly.length === 0) { alert('이번 달 출고 이력이 없습니다.'); return }
-    generateMonthlyReport(logs, reagents, now.getFullYear(), now.getMonth() + 1)
-  }, [logs, reagents])
+    generateMonthlyReport(logs, reagents, now.getFullYear(), now.getMonth() + 1, inboundLogs)
+  }, [logs, reagents, inboundLogs])
 
   const toggleFilter = useCallback(
     (type) => setActiveFilter((prev) => (prev === type ? null : type)), [],
@@ -356,6 +452,14 @@ export default function App() {
                 )}
               </div>
               <button
+                onClick={() => setShowInboundModal(true)}
+                className="flex items-center gap-1.5 bg-teal-600 hover:bg-teal-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
+                title="시약 입고 등록"
+              >
+                <PackagePlus size={14} />
+                입고 등록
+              </button>
+              <button
                 onClick={handleBackup}
                 className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
                 title="재고 + 출고이력 전체 백업"
@@ -372,21 +476,23 @@ export default function App() {
           </div>
           {/* Tabs */}
           <div className="flex gap-0.5">
-            {[{ key: 'dashboard', label: '대시보드' }, { key: 'history', label: '출고 이력' }].map(
-              ({ key, label }) => (
-                <button
-                  key={key}
-                  onClick={() => setActiveTab(key)}
-                  className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                    activeTab === key
-                      ? 'border-blue-600 text-blue-600'
-                      : 'border-transparent text-slate-500 hover:text-slate-700'
-                  }`}
-                >
-                  {label}
-                </button>
-              ),
-            )}
+            {[
+              { key: 'dashboard', label: '대시보드' },
+              { key: 'history',   label: '출고 이력' },
+              { key: 'inbound',   label: '입고 이력' },
+            ].map(({ key, label }) => (
+              <button
+                key={key}
+                onClick={() => setActiveTab(key)}
+                className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                  activeTab === key
+                    ? 'border-blue-600 text-blue-600'
+                    : 'border-transparent text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
           </div>
         </div>
       </header>
@@ -412,10 +518,21 @@ export default function App() {
             onCancelEdit={cancelEdit}
             onEditValue={setEditValue}
           />
-        ) : (
+        ) : activeTab === 'history' ? (
           <HistoryTab logs={logs} onExport={handleExport} />
+        ) : (
+          <InboundHistoryTab inboundLogs={inboundLogs} />
         )}
       </main>
+
+      {showInboundModal && (
+        <InboundModal
+          reagents={reagents}
+          syncing={syncing}
+          onClose={() => setShowInboundModal(false)}
+          onSubmit={handleInbound}
+        />
+      )}
     </div>
   )
 }
@@ -546,25 +663,35 @@ function ReagentTable({
         <table className="w-full text-sm">
           <thead>
             <tr className="bg-blue-600 text-white">
-              {['시약명', '제조사', 'Lot No', '현재재고', '최소재고 (편집)', '유효기간', '누적출고', '출고'].map((h) => (
+              {['시약명', '제조사', '구분', 'Lot No', '현재재고', '최소재고 (편집)', '유효기간', '누적출고', '출고'].map((h) => (
                 <th key={h} className="px-4 py-2.5 text-left text-xs font-semibold whitespace-nowrap tracking-wide">{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {reagents.length === 0 ? (
-              <tr><td colSpan={8} className="text-center py-16 text-slate-400 text-sm">표시할 데이터가 없습니다.</td></tr>
+              <tr><td colSpan={9} className="text-center py-16 text-slate-400 text-sm">표시할 데이터가 없습니다.</td></tr>
             ) : reagents.map((r, i) => {
               const days = diffDays(r.expiryDate)
               const isExpiring = days >= 0 && days < 15
               const isExpired = days < 0
               const isLow = r.currentStock < r.minStock
+              const typeCfg = {
+                Reagent: 'bg-blue-100 text-blue-700',
+                Cal:     'bg-purple-100 text-purple-700',
+                Con:     'bg-orange-100 text-orange-700',
+              }
               return (
                 <tr key={r.id} className={`border-t border-slate-50 hover:bg-blue-50/30 transition-colors ${i % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'}`}>
                   <td className="px-4 py-3 font-medium text-slate-800 max-w-[200px]">
                     <div className="truncate">{r.name}</div>
                   </td>
                   <td className="px-4 py-3 text-slate-500 whitespace-nowrap">{r.manufacturer}</td>
+                  <td className="px-4 py-3 whitespace-nowrap">
+                    <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${typeCfg[r.reagentType] ?? typeCfg.Reagent}`}>
+                      {r.reagentType ?? 'Reagent'}
+                    </span>
+                  </td>
                   <td className="px-4 py-3 font-mono text-xs text-slate-500 whitespace-nowrap">{r.lotNo}</td>
                   <td className="px-4 py-3 whitespace-nowrap">
                     <span className={`font-bold text-base ${isLow ? 'text-red-600' : 'text-slate-800'}`}>{r.currentStock}</span>
@@ -623,7 +750,7 @@ function ReagentTable({
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// HistoryTab
+// HistoryTab (출고)
 // ══════════════════════════════════════════════════════════════════════════
 function HistoryTab({ logs, onExport }) {
   const [search, setSearch] = useState('')
@@ -689,6 +816,205 @@ function HistoryTab({ logs, onExport }) {
           {filtered.length}건 표시 중
         </div>
       </div>
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// InboundHistoryTab (입고)
+// ══════════════════════════════════════════════════════════════════════════
+function InboundHistoryTab({ inboundLogs }) {
+  const [search, setSearch] = useState('')
+  const filtered = useMemo(() => {
+    if (!search.trim()) return inboundLogs
+    const q = search.trim().toLowerCase()
+    return inboundLogs.filter(
+      (l) => l.reagentName.toLowerCase().includes(q) || l.lotNo.toLowerCase().includes(q),
+    )
+  }, [inboundLogs, search])
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2 className="text-base font-semibold text-slate-700">입고 이력 목록</h2>
+        <p className="text-xs text-slate-400 mt-0.5">총 {inboundLogs.length}건의 입고 기록</p>
+      </div>
+      <div className="relative">
+        <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+        <input
+          value={search} onChange={(e) => setSearch(e.target.value)}
+          placeholder="시약명, Lot No 검색..."
+          className="w-full pl-9 pr-4 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-teal-300 bg-white"
+        />
+      </div>
+      <div className="bg-white rounded-xl border border-slate-100 shadow-sm overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-teal-600 text-white">
+                {['입고일시', '시약명', 'Lot No', '입고수량', '비고'].map((h) => (
+                  <th key={h} className="px-4 py-2.5 text-left text-xs font-semibold whitespace-nowrap tracking-wide">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.length === 0 ? (
+                <tr><td colSpan={5} className="text-center py-16 text-slate-400 text-sm">입고 이력이 없습니다.</td></tr>
+              ) : filtered.map((l, i) => (
+                <tr key={l.id} className={`border-t border-slate-50 hover:bg-teal-50/30 transition-colors ${i % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'}`}>
+                  <td className="px-4 py-2.5 font-mono text-xs text-slate-500 whitespace-nowrap">{l.datetime}</td>
+                  <td className="px-4 py-2.5 font-medium text-slate-800">{l.reagentName}</td>
+                  <td className="px-4 py-2.5 font-mono text-xs text-slate-500 whitespace-nowrap">{l.lotNo}</td>
+                  <td className="px-4 py-2.5">
+                    <span className="bg-teal-100 text-teal-700 text-xs font-bold px-2 py-0.5 rounded-full">{l.qty}개</span>
+                  </td>
+                  <td className="px-4 py-2.5 text-xs text-slate-400">{l.notes || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="px-4 py-2 bg-slate-50 border-t border-slate-100 text-xs text-slate-400">
+          {filtered.length}건 표시 중
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// InboundModal
+// ══════════════════════════════════════════════════════════════════════════
+function InboundModal({ reagents, syncing, onClose, onSubmit }) {
+  const [mode, setMode] = useState('new')
+  const [form, setForm] = useState({
+    name: '', reagentType: 'Reagent', manufacturer: '', lotNo: '', qty: 1, minStock: 0,
+    expiryDate: '', notes: '', reagentId: reagents[0]?.id ?? '',
+  })
+  const setF = (k, v) => setForm((prev) => ({ ...prev, [k]: v }))
+
+  const handleSubmit = () => {
+    if (mode === 'new') {
+      if (!form.name.trim())  { alert('시약명을 입력해주세요.'); return }
+      if (!form.lotNo.trim()) { alert('Lot No를 입력해주세요.'); return }
+      if (Number(form.qty) < 1) { alert('입고량을 1 이상 입력해주세요.'); return }
+    } else {
+      if (!form.reagentId)    { alert('시약을 선택해주세요.'); return }
+      if (Number(form.qty) < 1) { alert('추가 수량을 1 이상 입력해주세요.'); return }
+    }
+    onSubmit({ mode, form })
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] flex flex-col">
+        {/* 헤더 */}
+        <div className="flex items-center justify-between px-6 py-4 border-b shrink-0">
+          <div className="flex items-center gap-2">
+            <PackagePlus size={18} className="text-teal-600" />
+            <h2 className="text-base font-bold text-slate-800">입고 등록</h2>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors">
+            <X size={18} />
+          </button>
+        </div>
+        {/* 모드 탭 */}
+        <div className="flex border-b shrink-0">
+          {[['new', '신규 Lot 등록'], ['existing', '기존 재고 추가']].map(([m, label]) => (
+            <button
+              key={m}
+              onClick={() => setMode(m)}
+              className={`flex-1 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+                mode === m
+                  ? 'border-teal-500 text-teal-600'
+                  : 'border-transparent text-slate-400 hover:text-slate-600'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {/* 입력 폼 */}
+        <div className="p-6 space-y-4 overflow-y-auto">
+          {mode === 'new' ? (
+            <>
+              <div className="grid grid-cols-2 gap-3">
+                <ModalField label="시약명 *" value={form.name} onChange={(v) => setF('name', v)} placeholder="예) CBC 희석액" />
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 mb-1.5">구분 *</label>
+                  <select
+                    value={form.reagentType}
+                    onChange={(e) => setF('reagentType', e.target.value)}
+                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300 bg-white"
+                  >
+                    <option value="Reagent">Reagent</option>
+                    <option value="Cal">Cal</option>
+                    <option value="Con">Con</option>
+                  </select>
+                </div>
+              </div>
+              <ModalField label="제조사" value={form.manufacturer} onChange={(v) => setF('manufacturer', v)} placeholder="예) Sysmex" />
+              <ModalField label="Lot No. *" value={form.lotNo} onChange={(v) => setF('lotNo', v)} placeholder="예) SX2025-001" />
+              <div className="grid grid-cols-2 gap-3">
+                <ModalField label="입고량 *" type="number" value={form.qty} onChange={(v) => setF('qty', v)} />
+                <ModalField label="최소유지재고" type="number" value={form.minStock} onChange={(v) => setF('minStock', v)} />
+              </div>
+              <ModalField label="유효기간" type="date" value={form.expiryDate} onChange={(v) => setF('expiryDate', v)} />
+            </>
+          ) : (
+            <>
+              <div>
+                <label className="block text-xs font-semibold text-slate-500 mb-1.5">시약 선택 *</label>
+                <select
+                  value={form.reagentId}
+                  onChange={(e) => setF('reagentId', e.target.value)}
+                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300 bg-white"
+                >
+                  {reagents.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.name} — {r.lotNo} (현재 {r.currentStock}개)
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <ModalField label="추가 수량 *" type="number" value={form.qty} onChange={(v) => setF('qty', v)} />
+            </>
+          )}
+          <ModalField label="비고" value={form.notes} onChange={(v) => setF('notes', v)} placeholder="(선택 사항)" />
+        </div>
+        {/* 버튼 */}
+        <div className="flex gap-3 px-6 pb-5 shrink-0">
+          <button
+            onClick={onClose}
+            className="flex-1 py-2.5 text-sm font-medium border border-slate-200 rounded-lg text-slate-600 hover:bg-slate-50 transition-colors"
+          >
+            취소
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={syncing}
+            className="flex-1 py-2.5 text-sm font-semibold bg-teal-600 hover:bg-teal-700 disabled:bg-slate-200 disabled:text-slate-400 text-white rounded-lg transition-colors"
+          >
+            {syncing ? '저장 중...' : '등록하기'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ModalField({ label, value, onChange, type = 'text', placeholder = '' }) {
+  return (
+    <div>
+      <label className="block text-xs font-semibold text-slate-500 mb-1.5">{label}</label>
+      <input
+        type={type}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        min={type === 'number' ? 0 : undefined}
+        className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+      />
     </div>
   )
 }

@@ -53,13 +53,12 @@ const FIXED = [
 const NF = FIXED.length // 9
 
 // ── 메인 진입점 ────────────────────────────────────────────────────────────
-export function generateMonthlyReport(logs, reagents, year, month) {
+export function generateMonthlyReport(logs, reagents, year, month, inboundLogs = []) {
   const ym        = `${year}-${String(month).padStart(2, '0')}`
-  const lastDay   = new Date(year, month, 0).getDate() // 해당 월 마지막 날짜
+  const lastDay   = new Date(year, month, 0).getDate()
   const monthly   = logs.filter((l) => l.datetime.startsWith(ym))
 
-  // ── 시약별 · 일별 사용량 사전 계산 ─────────────────────────────────────
-  /** Map<reagentId, Map<day, qty>> */
+  // ── 시약별 · 일별 사용량 ─────────────────────────────────────────────
   const usageByRg = new Map()
   monthly.forEach((log) => {
     const day = parseInt(log.datetime.slice(8, 10), 10)
@@ -68,7 +67,7 @@ export function generateMonthlyReport(logs, reagents, year, month) {
     dm.set(day, (dm.get(day) ?? 0) + log.qty)
   })
 
-  /** 날짜별 전체 합계 Map<day, qty> */
+  // ── 날짜별 전체 합계 ──────────────────────────────────────────────────
   const dayTotals = new Map()
   for (let d = 1; d <= lastDay; d++) {
     const tot = monthly
@@ -77,13 +76,21 @@ export function generateMonthlyReport(logs, reagents, year, month) {
     dayTotals.set(d, tot)
   }
 
+  // ── 시약별 당월 입고량 ────────────────────────────────────────────────
+  const monthlyInbound = new Map()
+  inboundLogs
+    .filter((l) => l.datetime.startsWith(ym))
+    .forEach((l) => {
+      monthlyInbound.set(l.reagentId, (monthlyInbound.get(l.reagentId) ?? 0) + l.qty)
+    })
+
   const wb = XLSX.utils.book_new()
-  buildPivotSheet(wb, reagents, usageByRg, dayTotals, year, month, lastDay, monthly.length)
+  buildPivotSheet(wb, reagents, usageByRg, dayTotals, monthlyInbound, year, month, lastDay, monthly.length)
   XLSX.writeFile(wb, `${year}년_${month}월_시약사용대장.xlsx`)
 }
 
 // ── 피벗 시트 빌더 ────────────────────────────────────────────────────────
-function buildPivotSheet(wb, reagents, usageByRg, dayTotals, year, month, lastDay, totalLogs) {
+function buildPivotSheet(wb, reagents, usageByRg, dayTotals, monthlyInbound, year, month, lastDay, totalLogs) {
   const ws   = {}
   const TCOL = NF + 31 // 전체 컬럼 수 (고정9 + 날짜31)
   let R = 0
@@ -134,8 +141,9 @@ function buildPivotSheet(wb, reagents, usageByRg, dayTotals, year, month, lastDa
   reagents.forEach((rg, idx) => {
     const dm          = usageByRg.get(rg.id) ?? new Map()
     const monthlyUsed = [...dm.values()].reduce((s, v) => s + v, 0)
-    // 전월이월량 = 현재재고 + 당월사용량 (당월 신규입고 미추적 → 0 가정)
-    const carriedOver = rg.currentStock + monthlyUsed
+    const inboundQty  = monthlyInbound.get(rg.id) ?? 0
+    // 전월이월량 = 현재재고 + 당월사용량 - 당월입고량
+    const carriedOver = rg.currentStock + monthlyUsed - inboundQty
     const isLow       = rg.currentStock < rg.minStock
     const bg          = idx % 2 === 0 ? C.rowOdd : C.rowEven
 
@@ -153,7 +161,7 @@ function buildPivotSheet(wb, reagents, usageByRg, dayTotals, year, month, lastDa
       { v: rg.lotNo,                                       align: 'center', fx: {} },
       { v: rg.expiryDate ?? '',                            align: 'center', fx: {} },
       { v: rg.createdAt ? rg.createdAt.slice(0, 10) : '-', align: 'center', fx: {} },
-      { v: rg.receivedQty,                                 align: 'center', fx: {} },
+      { v: inboundQty,                                     align: 'center', fx: {} },
       { v: carriedOver,                                    align: 'center', fx: {} },
       { v: rg.currentStock, align: 'center',
         fx: isLow ? { bold: true, color: { rgb: C.danger } } : { color: { rgb: C.safe } } },

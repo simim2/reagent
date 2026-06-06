@@ -9,6 +9,7 @@ export const supabase = createClient(
 export const toAppReagent = (r) => ({
   id: r.id,
   name: r.name,
+  reagentType: r.reagent_type ?? 'Reagent',
   manufacturer: r.manufacturer,
   lotNo: r.lot_no,
   receivedQty: r.received_qty,
@@ -22,6 +23,7 @@ export const toAppReagent = (r) => ({
 export const toDbReagent = (r) => ({
   id: r.id,
   name: r.name,
+  reagent_type: r.reagentType ?? 'Reagent',
   manufacturer: r.manufacturer,
   lot_no: r.lotNo,
   received_qty: r.receivedQty,
@@ -48,4 +50,24 @@ export const toDbLog = (l) => ({
   lot_no: l.lotNo,
   qty: l.qty,
   datetime: l.datetime,
+})
+
+export const toAppInbound = (l) => ({
+  id: l.id,
+  reagentId: l.reagent_id,
+  reagentName: l.reagent_name,
+  lotNo: l.lot_no,
+  qty: l.qty,
+  datetime: l.datetime,
+  notes: l.notes ?? '',
+})
+
+export const toDbInbound = (l) => ({
+  id: l.id,
+  reagent_id: l.reagentId,
+  reagent_name: l.reagentName,
+  lot_no: l.lotNo,
+  qty: l.qty,
+  datetime: l.datetime,
+  notes: l.notes ?? '',
 })
