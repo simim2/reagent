@@ -17,6 +17,24 @@ const fmtDate = (d) => {
   const day = String(d.getDate()).padStart(2, '0')
   return `${y}-${m}-${day}`
 }
+
+// Excel 날짜값 → YYYY-MM-DD 문자열
+// Excel은 날짜를 시리얼 숫자(예: 46265)로 저장하므로 변환 필요
+const parseExcelDate = (val) => {
+  if (!val) return ''
+  if (val instanceof Date) return fmtDate(val)
+  if (typeof val === 'string') {
+    // 이미 날짜 형식이면 그대로
+    if (/^\d{4}-\d{2}-\d{2}/.test(val)) return val.slice(0, 10)
+    return val
+  }
+  if (typeof val === 'number') {
+    // Excel 시리얼 → JS Date (Excel epoch: 1899-12-30)
+    const d = new Date(Math.round((val - 25569) * 86400 * 1000))
+    return fmtDate(d)
+  }
+  return String(val)
+}
 const fmtDateTime = (d) => {
   const h = String(d.getHours()).padStart(2, '0')
   const min = String(d.getMinutes()).padStart(2, '0')
@@ -189,7 +207,7 @@ export default function App() {
     const reader = new FileReader()
     reader.onload = async (evt) => {
       try {
-        const wb = XLSX.read(evt.target.result, { type: 'array' })
+        const wb = XLSX.read(evt.target.result, { type: 'array', cellDates: true })
         const isBackup = wb.SheetNames.includes('재고')
 
         setSyncing(true)
@@ -208,7 +226,7 @@ export default function App() {
             receivedQty: Number(row['입고량'] ?? 0),
             currentStock: Number(row['현재재고'] ?? 0),
             minStock: Number(row['최소유지재고'] ?? 0),
-            expiryDate: String(row['유효기간'] ?? ''),
+            expiryDate: parseExcelDate(row['유효기간']),
             totalDispatched: Number(row['누적출고량'] ?? 0),
           }))
           const restoredLogs = logRows.map((row) => ({
@@ -242,7 +260,7 @@ export default function App() {
             receivedQty: Number(row['입고량'] ?? row['receivedQty'] ?? 0),
             currentStock: Number(row['현재재고'] ?? row['currentStock'] ?? 0),
             minStock: Number(row['최소유지재고'] ?? row['minStock'] ?? 0),
-            expiryDate: String(row['유효기간'] ?? row['expiryDate'] ?? ''),
+            expiryDate: parseExcelDate(row['유효기간'] ?? row['expiryDate']),
             totalDispatched: Number(row['누적출고량'] ?? row['totalDispatched'] ?? 0),
           }))
           await supabase.from('reagents').delete().neq('id', 0)
